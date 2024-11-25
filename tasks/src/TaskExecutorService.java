@@ -57,7 +57,6 @@ public class TaskExecutorService implements TaskExecutor{
             taskDispatcher = new Thread( () -> {start();});
             taskDispatcher.start();
         }
-        System.out.println("Consuctor executed");
     }
     @Override
     public <T> Future<T> submitTask(Task<T> task) {
