@@ -2,7 +2,6 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -24,7 +23,17 @@ import java.util.concurrent.TimeUnit;
  * 5. Tasks sharing the same TaskGroup must not run concurrently.
  */
 public class TaskExecutorService implements TaskExecutor{
-    // If the tasks are I/O Bound, this number could be increased
+
+    /**
+     * In general we can use following matrix to find optimal number of threads
+     * Ncpu = Number of CPU
+     * Ucpu = Target CPU utilization
+     * W/C = Ration of waiting time to computing time
+     *
+     * Nthreads = Ncpu * Ucpu * (1 + W/C)
+     * For this application, Assuming all tasks are CPU bound ( W/C = 0)
+     * Hence Nthreads = Ncpu * Ucpu
+     */
     private final int DEFAULT_CORE_POOL_SIZE = Runtime.getRuntime().availableProcessors();
     private final long DEFAULT_KEEP_ALIVE_TIME = 10l;
     private final int QUEUE_CAPACITY = 5000;
@@ -104,6 +113,7 @@ public class TaskExecutorService implements TaskExecutor{
 
     public void stop() {
         isRunning = false;
+        boolean interrupted = false;
         taskDispatcher.interrupt();
         executor.shutdown();
         try {
@@ -113,7 +123,12 @@ public class TaskExecutorService implements TaskExecutor{
                 executor.shutdownNow();
             }
         } catch (InterruptedException e) {
-            throw new RuntimeException(e);
+            interrupted = true;
+        }finally {
+            //set the flag so that code higher up in the hierarchy could take a decision.
+            if (interrupted) {
+               Thread.currentThread().interrupt();
+            }
         }
     }
 
