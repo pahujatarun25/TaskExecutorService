@@ -1,7 +1,6 @@
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -10,6 +9,9 @@ import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Tasks can be submitted concurrently. Task submission should not block the submitter.
@@ -38,11 +40,17 @@ public class TaskExecutorService implements TaskExecutor{
     private final long DEFAULT_KEEP_ALIVE_TIME = 10l;
     private final int QUEUE_CAPACITY = 5000;
     // Maintains task' future in the order task were submitted
-    LinkedBlockingDeque<Future> queue;
+    LinkedBlockingDeque<FutureTask> queue;
     ExecutorService executor;
     // Poll tasks from the queue and dispatch it to the executor.
     private Thread taskDispatcher;
     private volatile boolean isRunning;
+    private Lock startLock = new ReentrantLock(true);
+    private Condition startCondition = startLock.newCondition();
+
+    private volatile boolean canStart = true;
+    private ConcurrentHashMap<UUID, Lock> groupLocks = new ConcurrentHashMap<>();
+
 
     // Tracks Groups of the tasks that are currently being executed
     ConcurrentHashMap<TaskGroup, UUID> activeTaskGroups = new ConcurrentHashMap<>();
@@ -70,43 +78,68 @@ public class TaskExecutorService implements TaskExecutor{
     @Override
     public <T> Future<T> submitTask(Task<T> task) {
         Objects.requireNonNull(task);
-        Future<T> future = new TaskGroupFuture<T>(task.taskUUID(), task.taskAction(), task.taskGroup());
+        FutureTask<T> future = getFuture(task);
         queue.add(future);
         return future;
     }
 
-    private <T> void execute(FutureTask<T> futureTask) {
+    private <T> FutureTask<T> getFuture(Task<T> task) {
+        groupLocks.putIfAbsent(task.taskGroup().groupUUID(), new ReentrantLock());
+        return new FutureTask<T>(() -> {
+            System.out.println("Starting Task: "+ task.taskUUID());
+            signalToStartTask(task);
+            try {
+                groupLocks.get(task.taskGroup().groupUUID()).lock();
+                return task.taskAction().call();
+            } finally {
+                System.out.println("Group Lock is Free: "+task.taskGroup().groupUUID());
+                groupLocks.get(task.taskGroup().groupUUID()).unlock();
+            }
+        });
+    }
+
+    private <T> void signalToStartTask(Task<T> task) throws InterruptedException {
+        try{
+            startLock.lock();
+            canStart = true;
+            startCondition.signal();
+        }finally{
+            startLock.unlock();
+        }
+    }
+
+    private <T> void execute(FutureTask<T> futureTask) throws InterruptedException {
+        waitForTaskToStart(futureTask);
         try {
             executor.submit(futureTask);
         }catch (RejectedExecutionException ex) {
             if(!executor.isShutdown()){
-                System.out.println("Queue Space Full: Failed to execute following task: "+((TaskGroupFuture)futureTask).taskId);
+                System.out.println("Queue Space Full");
             }else {
-                System.out.println("Executor Shutdown: Failed to execute following task: "+((TaskGroupFuture)futureTask).taskId);
+                System.out.println("Executor Shutdown");
             }
+        }
+    }
+
+    private void waitForTaskToStart(FutureTask futureTask) throws InterruptedException {
+        startLock.lock();
+        try{
+            while(!canStart) {
+                startCondition.await();
+            }
+            canStart = false;
+        }finally{
+            startLock.unlock();
         }
     }
 
     private void start() {
         while(isRunning) {
-            TaskGroupFuture future = null;
             try {
-                future = (TaskGroupFuture) queue.take();
+                FutureTask futureTask = queue.take();
+                this.execute(futureTask);
             } catch (InterruptedException e) {
                 System.out.println("Interrupted: Shutdown event occurred.");
-                continue;
-            }
-            if(activeTaskGroups.putIfAbsent(future.group, future.taskId) == null){
-                System.out.println("Starting following TaskID: {"+future.taskId+"}, GroupId: {"+future.group.groupUUID()+"}");
-                this.execute(future);
-            }else {
-                /**
-                 * If a task with same group id is already being executed, put this task again at front of the queue
-                 * Yes it will lead to starvation for other tasks that are in queue but the requirement says
-                 * we have to process task in the order they are submitted.
-                 */
-                System.out.println("A task with same group already being executed");
-                queue.addFirst(future);
             }
         }
     }
@@ -129,23 +162,6 @@ public class TaskExecutorService implements TaskExecutor{
             if (interrupted) {
                Thread.currentThread().interrupt();
             }
-        }
-    }
-
-    private class TaskGroupFuture<V> extends FutureTask<V> {
-        private final TaskGroup group;
-        private final UUID taskId;
-        TaskGroupFuture(
-            UUID taskId,
-            Callable task,
-            TaskGroup group) {
-            super(task);
-            this.group = group;
-            this.taskId = taskId;
-        }
-        @Override
-        protected void done() {
-            activeTaskGroups.remove(group);
         }
     }
 }

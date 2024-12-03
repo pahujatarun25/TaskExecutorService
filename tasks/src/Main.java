@@ -1,12 +1,11 @@
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.Callable;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.FutureTask;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 public class Main {
     static List<Task> tasks = new ArrayList<>();
@@ -63,9 +62,8 @@ public class Main {
        TaskExecutorService executor = new TaskExecutorService(3, 10);
         tasks.parallelStream().forEach(
             task -> {
-            System.out.println("submitting following task: => "+task);
+                System.out.println("Submitting Task => "+task);
             Future future = executor.submitTask(task);
-
                 try {
                     System.out.println("Get Result =>"+future.get());
                 } catch (InterruptedException e) {
@@ -76,5 +74,7 @@ public class Main {
             });
         executor.stop();
     }
+
+    ;
 
 }
