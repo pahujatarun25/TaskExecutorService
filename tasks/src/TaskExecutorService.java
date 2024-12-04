@@ -51,9 +51,6 @@ public class TaskExecutorService implements TaskExecutor{
     private volatile boolean canStart = true;
     private ConcurrentHashMap<UUID, Lock> groupLocks = new ConcurrentHashMap<>();
 
-
-    // Tracks Groups of the tasks that are currently being executed
-    ConcurrentHashMap<TaskGroup, UUID> activeTaskGroups = new ConcurrentHashMap<>();
     public TaskExecutorService(int maxConcurrentExecution, long keepAliveTime) {
         queue = new LinkedBlockingDeque<>();
         if(maxConcurrentExecution <= 0 || DEFAULT_CORE_POOL_SIZE > maxConcurrentExecution) {
@@ -78,33 +75,22 @@ public class TaskExecutorService implements TaskExecutor{
     @Override
     public <T> Future<T> submitTask(Task<T> task) {
         Objects.requireNonNull(task);
+        if(!isRunning){
+            throw new RejectedExecutionException("Executor is Shuttingdown. Not accepting any new request.");
+        }
         FutureTask<T> future = getFuture(task);
         queue.add(future);
         return future;
     }
 
-    private <T> FutureTask<T> getFuture(Task<T> task) {
-        groupLocks.putIfAbsent(task.taskGroup().groupUUID(), new ReentrantLock());
-        return new FutureTask<T>(() -> {
-            System.out.println("Starting Task: "+ task.taskUUID());
-            signalToStartTask(task);
+    private void start() {
+        while(isRunning) {
             try {
-                groupLocks.get(task.taskGroup().groupUUID()).lock();
-                return task.taskAction().call();
-            } finally {
-                System.out.println("Group Lock is Free: "+task.taskGroup().groupUUID());
-                groupLocks.get(task.taskGroup().groupUUID()).unlock();
+                FutureTask futureTask = queue.take();
+                this.execute(futureTask);
+            } catch (InterruptedException e) {
+                System.out.println("Interrupted: Shutdown event occurred.");
             }
-        });
-    }
-
-    private <T> void signalToStartTask(Task<T> task) throws InterruptedException {
-        try{
-            startLock.lock();
-            canStart = true;
-            startCondition.signal();
-        }finally{
-            startLock.unlock();
         }
     }
 
@@ -121,6 +107,31 @@ public class TaskExecutorService implements TaskExecutor{
         }
     }
 
+    private <T> FutureTask<T> getFuture(Task<T> task) {
+        groupLocks.putIfAbsent(task.taskGroup().groupUUID(), new ReentrantLock());
+        return new FutureTask<T>(() -> {
+            signalToStartTask(task);
+            try {
+                groupLocks.get(task.taskGroup().groupUUID()).lock();
+                System.out.println("Starting Task: "+ task.taskUUID());
+                return task.taskAction().call();
+            } finally {
+                System.out.println("Group Lock is Free: "+task.taskGroup());
+                groupLocks.get(task.taskGroup().groupUUID()).unlock();
+            }
+        });
+    }
+
+    private <T> void signalToStartTask(Task<T> task) throws InterruptedException {
+        try{
+            startLock.lock();
+            canStart = true;
+            startCondition.signal();
+        }finally{
+            startLock.unlock();
+        }
+    }
+
     private void waitForTaskToStart(FutureTask futureTask) throws InterruptedException {
         startLock.lock();
         try{
@@ -133,27 +144,16 @@ public class TaskExecutorService implements TaskExecutor{
         }
     }
 
-    private void start() {
-        while(isRunning) {
-            try {
-                FutureTask futureTask = queue.take();
-                this.execute(futureTask);
-            } catch (InterruptedException e) {
-                System.out.println("Interrupted: Shutdown event occurred.");
-            }
-        }
-    }
-
     public void stop() {
         isRunning = false;
         boolean interrupted = false;
         taskDispatcher.interrupt();
         executor.shutdown();
         try {
-            if(executor.awaitTermination(60, TimeUnit.MILLISECONDS)){
-                System.out.print("Terminated Gracefully with execution of all pending tasks.");
-            }else {
-                executor.shutdownNow();
+            while(!executor.isTerminated()) {
+                if(executor.awaitTermination(60, TimeUnit.MILLISECONDS)){
+                    System.out.print("Terminated Gracefully with execution of all pending tasks.");
+                }
             }
         } catch (InterruptedException e) {
             interrupted = true;
